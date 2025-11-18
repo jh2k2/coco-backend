@@ -1,8 +1,8 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import CheckConstraint, DateTime, ForeignKey, Index, Integer, Numeric, String, Text, UniqueConstraint
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy import CheckConstraint, DateTime, ForeignKey, Index, Integer, JSON, Numeric, String, Text, UniqueConstraint
+from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.sql import func
 
@@ -69,3 +69,43 @@ class DashboardRollup(Base):
 
 
 Index("idx_sessions_user_started", Session.user_id, Session.started_at.desc())
+
+
+json_type = JSON().with_variant(JSONB, "postgresql")
+
+
+class DeviceLatestHeartbeat(Base):
+    __tablename__ = "device_latest_heartbeat"
+
+    device_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    agent_version: Mapped[str] = mapped_column(Text, nullable=False)
+    connectivity: Mapped[str] = mapped_column(String, nullable=False)
+    signal_rssi: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    latency_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    agent_status: Mapped[str] = mapped_column(String, nullable=False)
+    last_session_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    server_received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+Index("idx_device_latest_heartbeat_received_at", DeviceLatestHeartbeat.server_received_at.desc())
+
+
+class DeviceHeartbeatEvent(Base):
+    __tablename__ = "device_heartbeat_events"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4,
+        server_default=func.gen_random_uuid(),
+    )
+    device_id: Mapped[str] = mapped_column(Text, nullable=False)
+    raw_payload: Mapped[dict] = mapped_column(json_type, nullable=False)
+    server_received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+Index(
+    "idx_device_heartbeat_events_device_ts",
+    DeviceHeartbeatEvent.device_id,
+    DeviceHeartbeatEvent.server_received_at.desc(),
+)

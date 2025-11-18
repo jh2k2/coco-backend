@@ -246,9 +246,11 @@ Highlights:
 - Exposes health probes:
   - `GET /healthz` verifies database connectivity.
   - `GET /readyz` ensures the service can reach the database and confirms the seven-day window contract.
-- Defines the two primary routes:
+- Defines the core routes:
   - `POST /internal/ingest/session_summary`: Validates auth, processes ingestion, handles unique constraint errors gracefully, and returns `{"status": "ok"}` or `{"status": "duplicate"}` (always `200 OK`).
+  - `POST /internal/heartbeat`: Records Coco device heartbeats (connectivity + minimal runtime metadata) for operational visibility.
   - `GET /api/dashboard/{user_id}`: Authenticates access, lazily creates missing users, returns zeroed arrays for new participants, and timestamps `lastUpdated`.
+  - `GET /api/heartbeats`: Returns precomputed heartbeat health so the dashboard can render healthy/degraded/dead tiles without post-processing.
 - Publishes helper constant (`WINDOW_DAYS`) that documents the dashboard contract.
 - Utility functions:
   - `_build_dashboard_response()` merges raw rollup data with derived values.
@@ -320,6 +322,86 @@ PY
 ```
 
 Pipe the output into `curl --data @-` to avoid saving a temporary file. Once the ingest call returns `{"status":"ok"}`, fetch the dashboard snapshot for the same `user_external_id` to confirm the rollup updated.
+
+### POST `/internal/heartbeat`
+
+- **Authorization:** Bearer token matching `INGEST_SERVICE_TOKEN`.
+- **Request Body:** Minimal heartbeat payload emitted every 5 minutes (± jitter) by the Coco device agent:
+
+  ```json
+  {
+    "device_id": "coco-001",
+    "agent_version": "0.3.2",
+    "connectivity": "wifi",
+    "network": {"interface": "wlan0", "ip": "192.168.0.42", "signal_rssi": -62, "latency_ms": 43},
+    "agent_status": "ok",
+    "last_session_at": "2025-11-16T09:00:45Z"
+  }
+  ```
+
+- **Behavior:**
+  - Stamps `server_received_at` with server time when the heartbeat arrives (device-reported `timestamp` is stored but not used for freshness).
+  - Upserts the latest device state into `device_latest_heartbeat` and appends the raw payload into `device_heartbeat_events` (7-day retention handled separately).
+  - Accepts an optional `last_session_at` (must be timezone-aware).
+  - Returns `{"status": "ok"}` on success.
+  - Recommended cleanup job (daily): `DELETE FROM device_heartbeat_events WHERE server_received_at < now() - interval '7 days';`
+
+#### Database schema for heartbeats (authoritative)
+
+`device_latest_heartbeat` (stores only the most recent beat per device)
+- `device_id TEXT PRIMARY KEY`
+- `agent_version TEXT NOT NULL`
+- `connectivity TEXT NOT NULL` (`wifi|lte|offline`; validation-required)
+- `signal_rssi INT NULL` (optional; currently not used for status)
+- `latency_ms INT NULL` (optional)
+- `agent_status TEXT NOT NULL` (`ok|degraded|crashed`)
+- `last_session_at TIMESTAMPTZ NULL`
+- `server_received_at TIMESTAMPTZ NOT NULL`
+- Index: `idx_device_latest_heartbeat_received_at` on `server_received_at DESC`
+
+`device_heartbeat_events` (append-only raw payload log)
+- `id UUID PRIMARY KEY DEFAULT gen_random_uuid()`
+- `device_id TEXT NOT NULL`
+- `raw_payload JSONB NOT NULL` (exact request body)
+- `server_received_at TIMESTAMPTZ NOT NULL`
+- Index: `idx_device_heartbeat_events_device_ts` on `(device_id, server_received_at DESC)`
+- Retention: delete rows older than 7 days (see cleanup job above)
+
+#### Heartbeat Health Rules (MVP)
+- `dead` → `lastSeen` older than 20 minutes
+- `healthy` → `agent_status == "ok"` **and** `latencyMs < 300` (latency present)
+- `degraded` → all other cases (including missing latency)
+
+Missing/optional field handling:
+- Missing `latencyMs` → treated as `degraded`.
+- Missing `signalRssi` → ignored for now (no effect on status).
+- `connectivity` is required; if validation fails the request is rejected. If you need to allow missing connectivity, default it to `degraded`.
+
+### GET `/api/heartbeats`
+
+- **Authorization:** Dashboard bearer token mapped to `*` (admin/wildcard access).
+- **Response:**
+
+  ```json
+  {
+    "devices": [
+      {
+        "deviceId": "device-123",
+        "status": "healthy",
+        "lastSeen": "2025-10-22T14:45:00Z",
+        "connectivity": "wifi",
+        "agentVersion": "0.3.2",
+        "signalRssi": -62,
+        "latencyMs": 43,
+        "lastSessionAt": "2025-10-22T14:30:00Z"
+      }
+    ],
+    "asOf": "2025-10-22T14:45:05Z",
+    "staleThresholdMinutes": 20
+  }
+  ```
+
+- **Behavior:** Orders devices by most recent heartbeat. Marks devices `dead` when `lastSeen` is older than `staleThresholdMinutes` (currently 20 minutes). Otherwise `healthy` when `agentStatus` is `ok` **and** `latencyMs < 300`; `degraded` otherwise (including missing latency).
 
 ### GET `/api/dashboard/{user_id}`
 

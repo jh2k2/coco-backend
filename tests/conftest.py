@@ -22,9 +22,13 @@ from app.config import get_settings
 get_settings.cache_clear()
 
 import app.database as database_module  # noqa: E402
+import app.dependencies as dependencies_module  # noqa: E402
+import app.models as models_module  # noqa: E402
 import app.main as main_module  # noqa: E402
 
 importlib.reload(database_module)
+importlib.reload(dependencies_module)
+importlib.reload(models_module)
 importlib.reload(main_module)
 
 from app.database import Base, engine  # noqa: E402

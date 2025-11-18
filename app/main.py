@@ -4,7 +4,7 @@ import json
 import logging
 import time
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Dict, List
 
@@ -19,7 +19,17 @@ from .config import get_settings
 from .database import Base, engine
 from .dependencies import get_db
 from .models import DashboardRollup, User
-from .schemas import AvgDuration, DashboardResponse, LastSession, SessionSummaryIngestRequest, Streak, ToneTrend
+from .schemas import (
+    AvgDuration,
+    DashboardResponse,
+    HeartbeatRequest,
+    HeartbeatSummaryResponse,
+    LastSession,
+    SessionSummaryIngestRequest,
+    Streak,
+    ToneTrend,
+)
+from .services.heartbeat import STALE_MINUTES, list_heartbeat_statuses, record_heartbeat
 from .services.ingest import ingest_session_summary
 
 logger = logging.getLogger("coco.api")
@@ -105,6 +115,51 @@ def readyz(db: Session = Depends(get_db)) -> Dict[str, int | str]:
 def readyz_head(db: Session = Depends(get_db)) -> Response:
     readyz(db)  # Reuse readiness checks without returning a JSON payload.
     return Response(status_code=status.HTTP_200_OK)
+
+
+@app.post("/internal/heartbeat", status_code=status.HTTP_200_OK)
+def record_device_heartbeat(
+    payload: HeartbeatRequest,
+    db: Session = Depends(get_db),
+    authorization: str | None = Header(default=None),
+) -> Dict[str, str]:
+    require_service_token(authorization)
+    hb = record_heartbeat(db, payload)
+    db.commit()
+    heartbeat_age_seconds: float | None = None
+    if payload.timestamp is not None:
+        heartbeat_age_seconds = max(
+            0.0,
+            round((hb.server_received_at - payload.timestamp).total_seconds(), 3),
+        )
+    status = (
+        "dead"
+        if hb.server_received_at < datetime.now(timezone.utc) - timedelta(minutes=STALE_MINUTES)
+        else ("healthy" if hb.agent_status == "ok" and hb.latency_ms is not None and hb.latency_ms < 300 else "degraded")
+    )
+
+    logger.info(
+        json.dumps(
+            {
+                "event": "heartbeat_ingested",
+                "device_id": payload.device_id,
+                "agent_version": payload.agent_version,
+                "heartbeat_age_seconds": heartbeat_age_seconds,
+                "status": status,
+            }
+        )
+    )
+    return {"status": "ok"}
+
+
+@app.get("/api/heartbeats", response_model=HeartbeatSummaryResponse, status_code=status.HTTP_200_OK)
+def get_device_heartbeats(
+    db: Session = Depends(get_db),
+    authorization: str | None = Header(default=None),
+) -> HeartbeatSummaryResponse:
+    authorize_dashboard_access("*", authorization)
+    devices, as_of = list_heartbeat_statuses(db, stale_minutes=STALE_MINUTES)
+    return HeartbeatSummaryResponse(devices=devices, asOf=as_of, staleThresholdMinutes=STALE_MINUTES)
 
 
 @app.post("/internal/ingest/session_summary", status_code=status.HTTP_200_OK)
