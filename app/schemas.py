@@ -194,3 +194,17 @@ class LogSnapshotResponse(BaseModel):
 
 class LogSnapshotListResponse(BaseModel):
     snapshot: LogSnapshotResponse | None
+
+
+# Device-User Relationship Schemas
+
+
+class DeviceUserInfo(BaseModel):
+    user_external_id: str
+    last_session_at: datetime | None
+    session_count: int
+
+
+class DeviceUsersResponse(BaseModel):
+    device_id: str
+    users: list[DeviceUserInfo]

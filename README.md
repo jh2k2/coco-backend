@@ -180,20 +180,29 @@ Errors during configuration parsing raise early with human-readable messages to 
 
 ## Database Schema
 
-The schema follows the provided MVP design:
-
+**Tables (8 total):**
 - `users`: Stores canonical participants. `external_id` matches the frontend `user_id`.
-- `sessions`: Stores ingest records with duration, sentiment, and uniqueness enforced by `session_id`.
+- `sessions`: Stores ingest records with duration, sentiment, and uniqueness enforced by `session_id`. Includes optional `device_id` to link sessions to the originating device.
 - `dashboard_rollups`: Stores precomputed arrays for last seven days along with aggregate metrics and `updated_at` timestamp.
+- `device_latest_heartbeat`: Stores only the most recent heartbeat per device (upsert pattern).
+- `device_heartbeat_events`: Append-only raw payload log for historical analysis (7-day retention).
 - `device_commands`: Stores commands queued for IoT devices with status lifecycle (PENDING → PICKED_UP → COMPLETED/FAILED).
 - `device_log_snapshots`: Stores log content uploaded by devices for remote debugging.
 
-Highlights:
+**Migration History:**
+| Revision | Description |
+|----------|-------------|
+| `202407090001` | Initial schema (users, sessions, dashboard_rollups) |
+| `202409080001` | Add device heartbeats table |
+| `202502110001` | Heartbeat final spec |
+| `202511250001` | Add device_commands and device_log_snapshots |
+| `202511260001` | Add device_id column to sessions |
 
+**Highlights:**
 - UUID primary keys with `gen_random_uuid()` defaults.
 - Check constraints ensure `duration_seconds` (0–86400) and `sentiment_score` (0–1).
-- An index on `(user_id, started_at)` accelerates 7-day session scans.
-- Array columns use PostgreSQL `BOOLEAN[]`, `INT[]`, and `NUMERIC(4,2)[]` in production; the automated tests use equivalent JSON-backed shims for SQLite to keep feedback fast.
+- Key indexes: `idx_sessions_user_started`, `idx_sessions_device_id`, `idx_device_commands_device_status`.
+- Array columns use PostgreSQL `BOOLEAN[]`, `INT[]`, and `NUMERIC(4,2)[]` in production; the automated tests use equivalent JSON-backed shims for SQLite.
 
 > **Note:** Ensure the `pgcrypto` extension (for `gen_random_uuid()`) is enabled in the target database.
 
@@ -280,6 +289,7 @@ Highlights:
 ### POST `/internal/ingest/session_summary`
 
 - **Authorization:** Bearer token matching `INGEST_SERVICE_TOKEN`.
+- **Headers:** `X-Device-ID: <device_id>` (optional) — links the session to the originating device.
 - **Request Body:**
 
   ```json
@@ -509,6 +519,26 @@ The device command system enables remote management of IoT devices (Raspberry Pi
   ```
 
 - **Behavior:** Returns `{"snapshot": null}` if no logs have been uploaded for the device.
+
+### GET `/admin/devices/{device_id}/users`
+
+- **Authorization:** Bearer token matching `ADMIN_TOKEN`.
+- **Response** `200 OK`:
+
+  ```json
+  {
+    "device_id": "coco-living-room",
+    "users": [
+      {
+        "user_external_id": "user-123",
+        "last_session_at": "2024-11-25T14:35:00Z",
+        "session_count": 42
+      }
+    ]
+  }
+  ```
+
+- **Behavior:** Lists all users who have sessions on the specified device, ordered by most recent session.
 
 ### GET `/internal/commands/pending`
 

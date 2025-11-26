@@ -41,6 +41,7 @@ class Session(Base):
         server_default=func.gen_random_uuid(),
     )
     user_id: Mapped[str] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    device_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     session_id: Mapped[str] = mapped_column(String, nullable=False)
     started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     duration_seconds: Mapped[int] = mapped_column(Integer, nullable=False)
@@ -69,6 +70,7 @@ class DashboardRollup(Base):
 
 
 Index("idx_sessions_user_started", Session.user_id, Session.started_at.desc())
+Index("idx_sessions_device_id", Session.device_id)
 
 
 json_type = JSON().with_variant(JSONB, "postgresql")
@@ -158,3 +160,23 @@ class DeviceLogSnapshot(Base):
 
 
 Index("idx_device_log_snapshots_device_created", DeviceLogSnapshot.device_id, DeviceLogSnapshot.created_at.desc())
+
+
+class DeviceHeartbeatSummary(Base):
+    """Hourly aggregated heartbeat data for historical analysis."""
+
+    __tablename__ = "device_heartbeat_summaries"
+
+    device_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    hour_bucket: Mapped[datetime] = mapped_column(DateTime(timezone=True), primary_key=True)
+    heartbeat_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    avg_latency_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    min_latency_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    max_latency_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    connectivity_mode: Mapped[str] = mapped_column(String(20), nullable=False)
+    agent_status_ok_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    agent_status_degraded_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+Index("idx_heartbeat_summaries_device_hour", DeviceHeartbeatSummary.device_id, DeviceHeartbeatSummary.hour_bucket.desc())

@@ -13,7 +13,7 @@ from ..models import DashboardRollup, Session as SessionModel, User
 from ..schemas import SessionSummaryIngestRequest
 
 
-def ingest_session_summary(db: Session, payload: SessionSummaryIngestRequest) -> Dict[str, bool]:
+def ingest_session_summary(db: Session, payload: SessionSummaryIngestRequest, device_id: str | None = None) -> Dict[str, bool]:
     settings = get_settings()
     user = _get_or_create_user(db, payload.user_external_id)
     if _session_exists(db, payload.session_id):
@@ -22,6 +22,7 @@ def ingest_session_summary(db: Session, payload: SessionSummaryIngestRequest) ->
     db.add(
         SessionModel(
             user_id=user.id,
+            device_id=device_id,
             session_id=payload.session_id,
             started_at=payload.started_at,
             duration_seconds=payload.duration_seconds,

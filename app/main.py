@@ -10,7 +10,7 @@ from typing import Dict, List
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response, status
 from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy import select
+from sqlalchemy import func as sa_func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -18,13 +18,15 @@ from .auth import authorize_dashboard_access, require_admin_token, require_servi
 from .config import get_settings
 from .database import Base, engine
 from .dependencies import get_db
-from .models import DashboardRollup, User
+from .models import DashboardRollup, Session as SessionModel, User
 from .schemas import (
     AvgDuration,
     CommandCreateRequest,
     CommandResponse,
     CommandStatusUpdate,
     DashboardResponse,
+    DeviceUserInfo,
+    DeviceUsersResponse,
     HeartbeatRequest,
     HeartbeatSummaryResponse,
     LastSession,
@@ -44,7 +46,7 @@ from .services.commands import (
     save_log_snapshot,
     update_command_status,
 )
-from .services.heartbeat import STALE_MINUTES, list_heartbeat_statuses, record_heartbeat
+from .services.heartbeat import STALE_MINUTES, list_heartbeat_statuses, maybe_cleanup_old_events, record_heartbeat
 from .services.ingest import ingest_session_summary
 
 logger = logging.getLogger("coco.api")
@@ -140,6 +142,10 @@ def record_device_heartbeat(
 ) -> Dict[str, str]:
     require_service_token(authorization)
     hb = record_heartbeat(db, payload)
+
+    # Probabilistic cleanup of old heartbeat events (1% chance)
+    deleted_count = maybe_cleanup_old_events(db)
+
     db.commit()
     heartbeat_age_seconds: float | None = None
     if payload.timestamp is not None:
@@ -147,10 +153,10 @@ def record_device_heartbeat(
             0.0,
             round((hb.server_received_at - payload.timestamp).total_seconds(), 3),
         )
-    status = (
+    hb_status = (
         "dead"
         if hb.server_received_at < datetime.now(timezone.utc) - timedelta(minutes=STALE_MINUTES)
-        else ("healthy" if hb.agent_status == "ok" and hb.latency_ms is not None and hb.latency_ms < 300 else "degraded")
+        else ("healthy" if hb.agent_status == "ok" and hb.latency_ms is not None and hb.latency_ms < 500 else "degraded")
     )
 
     logger.info(
@@ -160,10 +166,21 @@ def record_device_heartbeat(
                 "device_id": payload.device_id,
                 "agent_version": payload.agent_version,
                 "heartbeat_age_seconds": heartbeat_age_seconds,
-                "status": status,
+                "status": hb_status,
             }
         )
     )
+
+    if deleted_count is not None and deleted_count > 0:
+        logger.info(
+            json.dumps(
+                {
+                    "event": "heartbeat_events_cleanup",
+                    "deleted_count": deleted_count,
+                }
+            )
+        )
+
     return {"status": "ok"}
 
 
@@ -183,11 +200,12 @@ def ingest_session_summary_endpoint(
     request: Request,
     db: Session = Depends(get_db),
     authorization: str | None = Header(default=None),
+    x_device_id: str | None = Header(default=None, alias="X-Device-ID"),
 ) -> Dict[str, str]:
     require_service_token(authorization)
     request.state.user_id = payload.user_external_id
     try:
-        result = ingest_session_summary(db, payload)
+        result = ingest_session_summary(db, payload, device_id=x_device_id)
         db.commit()
     except IntegrityError as exc:
         db.rollback()
@@ -348,6 +366,44 @@ def get_device_logs(
             created_at=snapshot.created_at,
         )
     )
+
+
+@app.get("/admin/devices/{device_id}/users", response_model=DeviceUsersResponse, status_code=status.HTTP_200_OK)
+def get_device_users(
+    device_id: str,
+    db: Session = Depends(get_db),
+    authorization: str | None = Header(default=None),
+) -> DeviceUsersResponse:
+    """List all users who have sessions on a specific device."""
+    require_admin_token(authorization)
+
+    # Query users with sessions on this device, aggregating session count and last session time
+    stmt = (
+        select(
+            User.external_id,
+            sa_func.max(SessionModel.started_at + timedelta(seconds=1) * SessionModel.duration_seconds).label(
+                "last_session_at"
+            ),
+            sa_func.count(SessionModel.id).label("session_count"),
+        )
+        .join(SessionModel, User.id == SessionModel.user_id)
+        .where(SessionModel.device_id == device_id)
+        .group_by(User.external_id)
+        .order_by(sa_func.max(SessionModel.started_at).desc())
+    )
+
+    results = db.execute(stmt).all()
+
+    users = [
+        DeviceUserInfo(
+            user_external_id=row.external_id,
+            last_session_at=row.last_session_at,
+            session_count=row.session_count,
+        )
+        for row in results
+    ]
+
+    return DeviceUsersResponse(device_id=device_id, users=users)
 
 
 # Device Endpoints (Internal)
