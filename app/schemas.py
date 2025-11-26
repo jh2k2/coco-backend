@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import uuid
 from datetime import datetime, timezone
+from enum import Enum
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -126,3 +128,69 @@ class DashboardResponse(BaseModel):
     lastUpdated: datetime
 
     model_config = ConfigDict(use_enum_values=True)
+
+
+# Device Command Schemas
+
+
+class CommandType(str, Enum):
+    REBOOT = "REBOOT"
+    RESTART_SERVICE = "RESTART_SERVICE"
+    UPLOAD_LOGS = "UPLOAD_LOGS"
+    UPDATE_NOW = "UPDATE_NOW"
+
+
+class CommandStatus(str, Enum):
+    PENDING = "PENDING"
+    PICKED_UP = "PICKED_UP"
+    COMPLETED = "COMPLETED"
+    FAILED = "FAILED"
+
+
+class CommandCreateRequest(BaseModel):
+    device_id: str = Field(min_length=1)
+    command: CommandType
+
+
+class CommandResponse(BaseModel):
+    id: uuid.UUID
+    device_id: str
+    command_type: CommandType
+    status: CommandStatus
+    created_at: datetime
+
+    model_config = ConfigDict(use_enum_values=True)
+
+
+class PendingCommandResponse(BaseModel):
+    id: uuid.UUID
+    command_type: CommandType
+    payload: dict | None
+    created_at: datetime
+
+    model_config = ConfigDict(use_enum_values=True)
+
+
+class PendingCommandsResponse(BaseModel):
+    command: PendingCommandResponse | None
+
+
+class CommandStatusUpdate(BaseModel):
+    status: Literal["COMPLETED", "FAILED"]
+    error: str | None = None
+
+
+class LogUploadRequest(BaseModel):
+    device_id: str = Field(min_length=1)
+    content: str = Field(min_length=1)
+
+
+class LogSnapshotResponse(BaseModel):
+    id: uuid.UUID
+    device_id: str
+    log_content: str
+    created_at: datetime
+
+
+class LogSnapshotListResponse(BaseModel):
+    snapshot: LogSnapshotResponse | None

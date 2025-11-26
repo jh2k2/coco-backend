@@ -109,3 +109,52 @@ Index(
     DeviceHeartbeatEvent.device_id,
     DeviceHeartbeatEvent.server_received_at.desc(),
 )
+
+
+class DeviceCommand(Base):
+    __tablename__ = "device_commands"
+    __table_args__ = (
+        CheckConstraint(
+            "command_type IN ('REBOOT', 'RESTART_SERVICE', 'UPLOAD_LOGS', 'UPDATE_NOW')",
+            name="chk_command_type",
+        ),
+        CheckConstraint(
+            "status IN ('PENDING', 'PICKED_UP', 'COMPLETED', 'FAILED')",
+            name="chk_command_status",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4,
+        server_default=func.gen_random_uuid(),
+    )
+    device_id: Mapped[str] = mapped_column(Text, nullable=False)
+    command_type: Mapped[str] = mapped_column(String(50), nullable=False)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="PENDING", server_default="PENDING")
+    payload: Mapped[dict | None] = mapped_column(json_type, nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now())
+
+
+Index("idx_device_commands_device_status", DeviceCommand.device_id, DeviceCommand.status)
+Index("idx_device_commands_created_at", DeviceCommand.created_at.desc())
+
+
+class DeviceLogSnapshot(Base):
+    __tablename__ = "device_log_snapshots"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4,
+        server_default=func.gen_random_uuid(),
+    )
+    device_id: Mapped[str] = mapped_column(Text, nullable=False)
+    log_content: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+Index("idx_device_log_snapshots_device_created", DeviceLogSnapshot.device_id, DeviceLogSnapshot.created_at.desc())

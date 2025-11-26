@@ -8,26 +8,41 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Dict, List
 
-from fastapi import Depends, FastAPI, Header, Request, Response, status
+from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response, status
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from .auth import authorize_dashboard_access, require_service_token
+from .auth import authorize_dashboard_access, require_admin_token, require_service_token
 from .config import get_settings
 from .database import Base, engine
 from .dependencies import get_db
 from .models import DashboardRollup, User
 from .schemas import (
     AvgDuration,
+    CommandCreateRequest,
+    CommandResponse,
+    CommandStatusUpdate,
     DashboardResponse,
     HeartbeatRequest,
     HeartbeatSummaryResponse,
     LastSession,
+    LogSnapshotListResponse,
+    LogSnapshotResponse,
+    LogUploadRequest,
+    PendingCommandResponse,
+    PendingCommandsResponse,
     SessionSummaryIngestRequest,
     Streak,
     ToneTrend,
+)
+from .services.commands import (
+    get_latest_log,
+    get_pending_command,
+    queue_command,
+    save_log_snapshot,
+    update_command_status,
 )
 from .services.heartbeat import STALE_MINUTES, list_heartbeat_statuses, record_heartbeat
 from .services.ingest import ingest_session_summary
@@ -280,3 +295,144 @@ def _is_unique_violation(error: IntegrityError) -> bool:
         return True
     message = str(error.orig).lower()
     return "unique" in message or "duplicate" in message
+
+
+# Admin Endpoints
+
+
+@app.post("/admin/commands", response_model=CommandResponse, status_code=status.HTTP_201_CREATED)
+def create_command(
+    payload: CommandCreateRequest,
+    db: Session = Depends(get_db),
+    authorization: str | None = Header(default=None),
+) -> CommandResponse:
+    """Queue a command for a device."""
+    require_admin_token(authorization)
+    command = queue_command(db, payload.device_id, payload.command.value)
+    db.commit()
+    logger.info(
+        json.dumps(
+            {
+                "event": "command_queued",
+                "command_id": str(command.id),
+                "device_id": payload.device_id,
+                "command_type": payload.command.value,
+            }
+        )
+    )
+    return CommandResponse(
+        id=command.id,
+        device_id=command.device_id,
+        command_type=command.command_type,
+        status=command.status,
+        created_at=command.created_at,
+    )
+
+
+@app.get("/admin/logs/{device_id}", response_model=LogSnapshotListResponse, status_code=status.HTTP_200_OK)
+def get_device_logs(
+    device_id: str,
+    db: Session = Depends(get_db),
+    authorization: str | None = Header(default=None),
+) -> LogSnapshotListResponse:
+    """Retrieve the most recent log snapshot for a device."""
+    require_admin_token(authorization)
+    snapshot = get_latest_log(db, device_id)
+    if snapshot is None:
+        return LogSnapshotListResponse(snapshot=None)
+    return LogSnapshotListResponse(
+        snapshot=LogSnapshotResponse(
+            id=snapshot.id,
+            device_id=snapshot.device_id,
+            log_content=snapshot.log_content,
+            created_at=snapshot.created_at,
+        )
+    )
+
+
+# Device Endpoints (Internal)
+
+
+@app.get("/internal/commands/pending", response_model=PendingCommandsResponse, status_code=status.HTTP_200_OK)
+def poll_pending_command(
+    db: Session = Depends(get_db),
+    authorization: str | None = Header(default=None),
+    x_device_id: str | None = Header(default=None, alias="X-Device-ID"),
+) -> PendingCommandsResponse:
+    """Poll for pending commands. Returns the oldest pending command and marks it as PICKED_UP."""
+    require_service_token(authorization)
+    if not x_device_id:
+        return PendingCommandsResponse(command=None)
+
+    command = get_pending_command(db, x_device_id)
+    db.commit()
+
+    if command is None:
+        return PendingCommandsResponse(command=None)
+
+    logger.info(
+        json.dumps(
+            {
+                "event": "command_picked_up",
+                "command_id": str(command.id),
+                "device_id": x_device_id,
+                "command_type": command.command_type,
+            }
+        )
+    )
+    return PendingCommandsResponse(
+        command=PendingCommandResponse(
+            id=command.id,
+            command_type=command.command_type,
+            payload=command.payload,
+            created_at=command.created_at,
+        )
+    )
+
+
+@app.post("/internal/commands/{command_id}/status", status_code=status.HTTP_200_OK)
+def report_command_status(
+    command_id: uuid.UUID,
+    payload: CommandStatusUpdate,
+    db: Session = Depends(get_db),
+    authorization: str | None = Header(default=None),
+) -> Dict[str, str]:
+    """Report command execution result."""
+    require_service_token(authorization)
+    command = update_command_status(db, command_id, payload.status, payload.error)
+    if command is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Command not found")
+    db.commit()
+    logger.info(
+        json.dumps(
+            {
+                "event": "command_status_updated",
+                "command_id": str(command_id),
+                "status": payload.status,
+                "error": payload.error,
+            }
+        )
+    )
+    return {"status": "ok"}
+
+
+@app.post("/internal/ingest/logs", status_code=status.HTTP_200_OK)
+def upload_logs(
+    payload: LogUploadRequest,
+    db: Session = Depends(get_db),
+    authorization: str | None = Header(default=None),
+) -> Dict[str, str]:
+    """Upload device logs."""
+    require_service_token(authorization)
+    snapshot = save_log_snapshot(db, payload.device_id, payload.content)
+    db.commit()
+    logger.info(
+        json.dumps(
+            {
+                "event": "logs_uploaded",
+                "snapshot_id": str(snapshot.id),
+                "device_id": payload.device_id,
+            }
+        )
+    )
+    return {"status": "ok", "snapshot_id": str(snapshot.id)}

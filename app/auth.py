@@ -28,3 +28,11 @@ def authorize_dashboard_access(requested_user: str, authorization: str | None = 
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Unauthorized")
     if allowed_user != "*" and allowed_user != requested_user:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Forbidden")
+
+
+def require_admin_token(authorization: str | None = Header(default=None)) -> None:
+    """Validate admin token for admin dashboard endpoints."""
+    token = _bearer_token(authorization)
+    settings = get_settings()
+    if token != settings.admin_token:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Unauthorized")

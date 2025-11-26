@@ -38,10 +38,18 @@ This repository implements a minimal FastAPI + PostgreSQL backend that ingests i
 
 ## System Overview
 
-The backend exposes two primary HTTP endpoints for product functionality:
+The backend exposes several HTTP endpoints for product functionality:
 
+**Core Engagement Endpoints:**
 1. `POST /internal/ingest/session_summary` accepts raw session telemetry from a trusted upstream device/service. Each request is validated, written to the `sessions` table, and triggers a rollup recomputation for the associated user.
 2. `GET /api/dashboard/{user_id}` provides a pre-computed snapshot of the last seven days of engagement for dashboard consumption. The payload mirrors the frontend contract byte-for-byte.
+
+**Device Command System (Admin Panel):**
+3. `POST /admin/commands` queues commands (REBOOT, RESTART_SERVICE, UPLOAD_LOGS, UPDATE_NOW) for IoT devices.
+4. `GET /admin/logs/{device_id}` retrieves the most recent log snapshot uploaded by a device.
+5. `GET /internal/commands/pending` allows devices to poll for pending commands.
+6. `POST /internal/commands/{id}/status` reports command execution results (COMPLETED/FAILED).
+7. `POST /internal/ingest/logs` accepts log uploads from devices.
 
 Operational endpoints complement the core API:
 
@@ -124,6 +132,8 @@ coco-backend/
 │   ├── models.py                # SQLAlchemy ORM models
 │   ├── schemas.py               # Pydantic request/response schemas
 │   └── services/
+│       ├── commands.py          # Device command queue and log snapshot services
+│       ├── heartbeat.py         # Device heartbeat tracking
 │       └── ingest.py            # Ingestion workflow and rollup calculations
 ├── alembic/                     # Migration environment
 │   ├── env.py
@@ -132,6 +142,8 @@ coco-backend/
 ├── scripts/
 │   └── seed_demo_data.py        # Utility to seed a demo participant
 ├── tests/                       # Pytest suite
+├── Dockerfile                   # Container image definition
+├── fly.toml                     # Fly.io deployment configuration
 └── requirements.txt             # Python dependencies
 ```
 
@@ -142,7 +154,8 @@ coco-backend/
 `app/config.py` reads environment variables into a Pydantic model. Required values:
 
 - `DATABASE_URL`: SQLAlchemy connection string (e.g., `postgresql+psycopg://user:pass@host/db`).
-- `INGEST_SERVICE_TOKEN`: Static bearer token for the ingest endpoint.
+- `INGEST_SERVICE_TOKEN`: Static bearer token for internal device endpoints (`/internal/*`).
+- `ADMIN_TOKEN`: Static bearer token for admin panel endpoints (`/admin/*`).
 - `DASHBOARD_TOKEN_MAP`: Mapping of dashboard bearer tokens to permitted user IDs. Accepts:
   - JSON-like dict via environment tooling, or
   - Comma-separated `token:user` pairs (e.g., `tokenA:user-123,tokenB:user-456`).
@@ -156,6 +169,7 @@ Example shell setup:
 ```bash
 export DATABASE_URL="postgresql+psycopg://postgres:postgres@localhost:5432/coco"
 export INGEST_SERVICE_TOKEN="svc-secret-token"
+export ADMIN_TOKEN="admin-secret-token"
 export DASHBOARD_TOKEN_MAP="dash-token-1:user-external-id"
 export DASHBOARD_ORIGIN="https://dashboard.local"
 ```
@@ -171,6 +185,8 @@ The schema follows the provided MVP design:
 - `users`: Stores canonical participants. `external_id` matches the frontend `user_id`.
 - `sessions`: Stores ingest records with duration, sentiment, and uniqueness enforced by `session_id`.
 - `dashboard_rollups`: Stores precomputed arrays for last seven days along with aggregate metrics and `updated_at` timestamp.
+- `device_commands`: Stores commands queued for IoT devices with status lifecycle (PENDING → PICKED_UP → COMPLETED/FAILED).
+- `device_log_snapshots`: Stores log content uploaded by devices for remote debugging.
 
 Highlights:
 
@@ -447,6 +463,129 @@ Replace the bearer token with one of the entries in `DASHBOARD_TOKEN_MAP`. The r
 
 ---
 
+## Device Command System
+
+The device command system enables remote management of IoT devices (Raspberry Pi units) through an HTTP polling architecture. Admins queue commands via the admin panel, devices poll for pending commands, execute them, and report results.
+
+### POST `/admin/commands`
+
+- **Authorization:** Bearer token matching `ADMIN_TOKEN`.
+- **Request Body:**
+
+  ```json
+  {
+    "device_id": "coco-living-room",
+    "command": "REBOOT"
+  }
+  ```
+
+- **Valid Commands:** `REBOOT`, `RESTART_SERVICE`, `UPLOAD_LOGS`, `UPDATE_NOW`
+- **Response** `201 Created`:
+
+  ```json
+  {
+    "id": "550e8400-e29b-41d4-a716-446655440000",
+    "device_id": "coco-living-room",
+    "command_type": "REBOOT",
+    "status": "PENDING",
+    "created_at": "2024-11-25T14:30:00Z"
+  }
+  ```
+
+### GET `/admin/logs/{device_id}`
+
+- **Authorization:** Bearer token matching `ADMIN_TOKEN`.
+- **Response** `200 OK`:
+
+  ```json
+  {
+    "snapshot": {
+      "id": "550e8400-e29b-41d4-a716-446655440001",
+      "device_id": "coco-living-room",
+      "log_content": "2024-11-25 14:32:01 [INFO] Agent started...",
+      "created_at": "2024-11-25T14:35:00Z"
+    }
+  }
+  ```
+
+- **Behavior:** Returns `{"snapshot": null}` if no logs have been uploaded for the device.
+
+### GET `/internal/commands/pending`
+
+- **Authorization:** Bearer token matching `INGEST_SERVICE_TOKEN`.
+- **Headers:** `X-Device-ID: <device_id>`
+- **Response** `200 OK`:
+
+  ```json
+  {
+    "command": {
+      "id": "550e8400-e29b-41d4-a716-446655440000",
+      "command_type": "REBOOT",
+      "payload": null,
+      "created_at": "2024-11-25T14:30:00Z"
+    }
+  }
+  ```
+
+- **Behavior:**
+  - Returns the oldest pending command for the device and atomically marks it as `PICKED_UP`.
+  - Returns `{"command": null}` if no pending commands exist.
+  - Uses `SELECT FOR UPDATE` to prevent race conditions in concurrent polling.
+
+### POST `/internal/commands/{command_id}/status`
+
+- **Authorization:** Bearer token matching `INGEST_SERVICE_TOKEN`.
+- **Request Body:**
+
+  ```json
+  {
+    "status": "COMPLETED"
+  }
+  ```
+
+  Or on failure:
+
+  ```json
+  {
+    "status": "FAILED",
+    "error": "Permission denied: sudo requires password"
+  }
+  ```
+
+- **Response** `200 OK`: `{"status": "ok"}`
+- **Errors:** `404` if command not found.
+
+### POST `/internal/ingest/logs`
+
+- **Authorization:** Bearer token matching `INGEST_SERVICE_TOKEN`.
+- **Request Body:**
+
+  ```json
+  {
+    "device_id": "coco-living-room",
+    "content": "2024-11-25 14:32:01 [INFO] Agent started..."
+  }
+  ```
+
+- **Response** `200 OK`:
+
+  ```json
+  {
+    "status": "ok",
+    "snapshot_id": "550e8400-e29b-41d4-a716-446655440001"
+  }
+  ```
+
+### Command Status Lifecycle
+
+```
+PENDING ──► PICKED_UP ──► COMPLETED
+                │
+                └──► FAILED
+```
+
+---
+
 ## Rollup Computation Details
 
 1. **Window Definition:** Locked to seven days for the MVP. The window includes today and the preceding six days in UTC.
@@ -467,8 +606,17 @@ This eager computation ensures dashboard reads are cheap and deterministic.
 
 ## Authentication Model
 
-- Ingest endpoint uses a single shared secret (`INGEST_SERVICE_TOKEN`). Requests without the exact token receive `401 Unauthorized`.
-- Dashboard endpoint uses a token-to-user map (`DASHBOARD_TOKEN_MAP`):
+Three authentication mechanisms protect different endpoint groups:
+
+| Endpoint Pattern | Token | Purpose |
+|------------------|-------|---------|
+| `/internal/*` | `INGEST_SERVICE_TOKEN` | Device-to-backend communication (heartbeats, commands, logs) |
+| `/admin/*` | `ADMIN_TOKEN` | Admin panel access (queue commands, view logs) |
+| `/api/dashboard/*` | `DASHBOARD_TOKEN_MAP` | Family dashboard access (per-user or wildcard) |
+
+- **Internal endpoints** use a single shared secret (`INGEST_SERVICE_TOKEN`). Requests without the exact token receive `401 Unauthorized`.
+- **Admin endpoints** use a separate shared secret (`ADMIN_TOKEN`) for the admin panel.
+- **Dashboard endpoints** use a token-to-user map (`DASHBOARD_TOKEN_MAP`):
   - Key: bearer token presented by the frontend or proxy.
   - Value: external user ID allowed for that token, or `*` for admin access.
   - Tokens not present in the map return `401`; mismatched user/token pairs return `403`.
@@ -610,10 +758,19 @@ Keep tokens in a secrets manager for shared environments and rotate them regular
 
 1. **Install & authenticate.** Install [`flyctl`](https://fly.io/docs/flyctl/install/) and run `fly auth login`.
 2. **Name the app.** Update `app` and (optionally) `primary_region` inside `fly.toml` before your first deploy.
-3. **Provision Postgres.** Create a managed database (`fly postgres create --name coco-db --region iad`) and note the app name it returns.
-4. **Attach the database.** `fly postgres attach --app <your-app-name> coco-db` creates the `DATABASE_URL` secret automatically. The backend accepts `postgres://` URLs and rewrites them to the `psycopg` driver at runtime.
-5. **Configure secrets.** Set production tokens and the dashboard origin:  
-   `fly secrets set INGEST_SERVICE_TOKEN=... DASHBOARD_TOKEN_MAP=... DASHBOARD_ORIGIN=https://dashboard.example.com`
+3. **Provision Postgres (or use Neon).** Either:
+   - Create a Fly managed database: `fly postgres create --name coco-db --region sjc`
+   - Or use an external provider like [Neon](https://neon.tech) and set `DATABASE_URL` manually.
+4. **Attach the database.** If using Fly Postgres: `fly postgres attach --app <your-app-name> coco-db` creates the `DATABASE_URL` secret automatically. The backend accepts `postgres://` URLs and rewrites them to the `psycopg` driver at runtime.
+5. **Configure secrets.** Set production tokens and the dashboard origin:
+   ```bash
+   fly secrets set \
+     INGEST_SERVICE_TOKEN=<device-token> \
+     ADMIN_TOKEN=<admin-panel-token> \
+     DASHBOARD_TOKEN_MAP=<token:user,...> \
+     DASHBOARD_ORIGIN=https://dashboard.example.com \
+     DASHBOARD_ALLOWED_ORIGINS=https://dashboard.example.com,https://admin.example.com
+   ```
 6. **Deploy the app.** Run `fly deploy`. The Dockerfile builds a Python 3.11 image, and the `[deploy]` `release_command` runs `alembic upgrade head` so schema migrations apply before new machines start.
 7. **Scale & verify.** Adjust resources if necessary (`fly scale memory 1024`) and watch the rollout with `fly status` and `fly logs`.
 8. **Run utilities.** Use `fly ssh console --command "python -m scripts.seed_demo_data"` to seed demo data or run one-off tasks inside the deployed container.

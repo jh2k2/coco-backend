@@ -24,3 +24,9 @@ htmlcov/
 # OS-specific junk
 .DS_Store
 Thumbs.db
+
+# Build artifacts (shouldn't be in backend but added for safety)
+.vite/
+
+# Claude Code
+.claude/

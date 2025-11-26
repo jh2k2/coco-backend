@@ -13,6 +13,7 @@ if str(ROOT_DIR) not in sys.path:
 
 os.environ.setdefault("DATABASE_URL", "sqlite+pysqlite:///:memory:")
 os.environ.setdefault("INGEST_SERVICE_TOKEN", "test-ingest-token")
+os.environ.setdefault("ADMIN_TOKEN", "test-admin-token")
 os.environ.setdefault("DASHBOARD_TOKEN_MAP", "dash-token:test-user,admin-token:*")
 os.environ.setdefault("DASHBOARD_ORIGIN", "http://dashboard.local")
 os.environ.setdefault("APP_ENV", "test")

@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field, ValidationError, field_validator, model_v
 class Settings(BaseModel):
     database_url: str = Field(..., alias="DATABASE_URL")
     ingest_service_token: str = Field(..., alias="INGEST_SERVICE_TOKEN")
+    admin_token: str = Field(..., alias="ADMIN_TOKEN")
     dashboard_token_map: Dict[str, str] = Field(default_factory=dict, alias="DASHBOARD_TOKEN_MAP")
     dashboard_origin: str = Field(..., alias="DASHBOARD_ORIGIN")
     dashboard_allowed_origins: List[str] = Field(default_factory=list, alias="DASHBOARD_ALLOWED_ORIGINS")
@@ -80,6 +81,7 @@ class Settings(BaseModel):
             return cls(
                 DATABASE_URL=database_url,
                 INGEST_SERVICE_TOKEN=os.environ["INGEST_SERVICE_TOKEN"],
+                ADMIN_TOKEN=os.environ["ADMIN_TOKEN"],
                 DASHBOARD_TOKEN_MAP=raw_dashboard_map,
                 DASHBOARD_ORIGIN=dashboard_origins[0],
                 DASHBOARD_ALLOWED_ORIGINS=dashboard_origins,
