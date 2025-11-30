@@ -204,8 +204,9 @@ def ingest_session_summary_endpoint(
 ) -> Dict[str, str]:
     require_service_token(authorization)
     request.state.user_id = payload.user_external_id
+    device_id = x_device_id or payload.device_id
     try:
-        result = ingest_session_summary(db, payload, device_id=x_device_id)
+        result = ingest_session_summary(db, payload, device_id=device_id)
         db.commit()
     except IntegrityError as exc:
         db.rollback()

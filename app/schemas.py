@@ -11,6 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 class SessionSummaryIngestRequest(BaseModel):
     session_id: str
     user_external_id: str
+    device_id: str | None = None
     started_at: datetime
     duration_seconds: int = Field(ge=0, le=86400)
     sentiment_score: float = Field(ge=0, le=1)
