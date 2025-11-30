@@ -27,6 +27,7 @@ def ingest_session_summary(db: Session, payload: SessionSummaryIngestRequest, de
             started_at=payload.started_at,
             duration_seconds=payload.duration_seconds,
             sentiment_score=_quantize_score(payload.sentiment_score),
+            status=payload.status,
         )
     )
     db.flush()

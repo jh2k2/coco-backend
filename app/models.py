@@ -32,6 +32,7 @@ class Session(Base):
         UniqueConstraint("session_id", name="uq_sessions_session_id"),
         CheckConstraint("duration_seconds BETWEEN 0 AND 86400", name="chk_duration_range"),
         CheckConstraint("sentiment_score >= 0 AND sentiment_score <= 1", name="chk_sentiment_range"),
+        CheckConstraint("status IN ('success', 'unattended', 'early_exit', 'error_exit')", name="chk_session_status"),
     )
 
     id: Mapped[str] = mapped_column(
@@ -46,6 +47,7 @@ class Session(Base):
     started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     duration_seconds: Mapped[int] = mapped_column(Integer, nullable=False)
     sentiment_score: Mapped[float] = mapped_column(Numeric(4, 2), nullable=False)
+    status: Mapped[str | None] = mapped_column(String(20), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
 
     user: Mapped[User] = relationship(back_populates="sessions")

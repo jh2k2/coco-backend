@@ -8,6 +8,13 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
+class SessionStatus(str, Enum):
+    SUCCESS = "success"
+    UNATTENDED = "unattended"
+    EARLY_EXIT = "early_exit"
+    ERROR_EXIT = "error_exit"
+
+
 class SessionSummaryIngestRequest(BaseModel):
     session_id: str
     user_external_id: str
@@ -15,6 +22,7 @@ class SessionSummaryIngestRequest(BaseModel):
     started_at: datetime
     duration_seconds: int = Field(ge=0, le=86400)
     sentiment_score: float = Field(ge=0, le=1)
+    status: SessionStatus | None = None
 
     model_config = ConfigDict(use_enum_values=True)
 
