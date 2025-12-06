@@ -30,6 +30,7 @@ def record_heartbeat(db: Session, heartbeat: HeartbeatRequest) -> DeviceLatestHe
             connectivity=heartbeat.connectivity,
             agent_status=heartbeat.agent_status,
             last_session_at=heartbeat.last_session_at,
+            boot_time=heartbeat.boot_time,
             signal_rssi=heartbeat.network.signal_rssi,
             latency_ms=heartbeat.network.latency_ms,
             server_received_at=now,
@@ -40,6 +41,7 @@ def record_heartbeat(db: Session, heartbeat: HeartbeatRequest) -> DeviceLatestHe
         existing.connectivity = heartbeat.connectivity
         existing.agent_status = heartbeat.agent_status
         existing.last_session_at = heartbeat.last_session_at
+        existing.boot_time = heartbeat.boot_time
         existing.signal_rssi = heartbeat.network.signal_rssi
         existing.latency_ms = heartbeat.network.latency_ms
         existing.server_received_at = now
@@ -74,6 +76,7 @@ def list_heartbeat_statuses(
             signalRssi=hb.signal_rssi,
             latencyMs=hb.latency_ms,
             lastSessionAt=_as_utc(hb.last_session_at),
+            bootTime=_as_utc(hb.boot_time),
         )
         for hb in records
     ]

@@ -361,14 +361,16 @@ Pipe the output into `curl --data @-` to avoid saving a temporary file. Once the
     "connectivity": "wifi",
     "network": {"interface": "wlan0", "ip": "192.168.0.42", "signal_rssi": -62, "latency_ms": 43},
     "agent_status": "ok",
-    "last_session_at": "2025-11-16T09:00:45Z"
+    "last_session_at": "2025-11-16T09:00:45Z",
+    "boot_time": "2025-11-16T06:00:00Z"
   }
   ```
 
 - **Behavior:**
   - Stamps `server_received_at` with server time when the heartbeat arrives (device-reported `timestamp` is stored but not used for freshness).
   - Upserts the latest device state into `device_latest_heartbeat` and appends the raw payload into `device_heartbeat_events` (7-day retention handled separately).
-  - Accepts an optional `last_session_at` (must be timezone-aware).
+  - Accepts optional `last_session_at` and `boot_time` (both must be timezone-aware if provided).
+  - `boot_time` should be the device's boot timestamp, allowing uptime calculation as `now - boot_time`.
   - Returns `{"status": "ok"}` on success.
   - Recommended cleanup job (daily): `DELETE FROM device_heartbeat_events WHERE server_received_at < now() - interval '7 days';`
 
@@ -382,6 +384,7 @@ Pipe the output into `curl --data @-` to avoid saving a temporary file. Once the
 - `latency_ms INT NULL` (optional)
 - `agent_status TEXT NOT NULL` (`ok|degraded|crashed`)
 - `last_session_at TIMESTAMPTZ NULL`
+- `boot_time TIMESTAMPTZ NULL` (device boot timestamp for uptime calculation)
 - `server_received_at TIMESTAMPTZ NOT NULL`
 - Index: `idx_device_latest_heartbeat_received_at` on `server_received_at DESC`
 
@@ -419,7 +422,8 @@ Missing/optional field handling:
         "agentVersion": "0.3.2",
         "signalRssi": -62,
         "latencyMs": 43,
-        "lastSessionAt": "2025-10-22T14:30:00Z"
+        "lastSessionAt": "2025-10-22T14:30:00Z",
+        "bootTime": "2025-10-22T06:00:00Z"
       }
     ],
     "asOf": "2025-10-22T14:45:05Z",

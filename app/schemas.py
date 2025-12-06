@@ -57,6 +57,7 @@ class HeartbeatRequest(BaseModel):
     agent_status: Literal["ok", "degraded", "crashed"]
     last_session_at: datetime | None = None
     timestamp: datetime | None = None
+    boot_time: datetime | None = None
 
     @field_validator("last_session_at", mode="after")
     @classmethod
@@ -72,6 +73,11 @@ class HeartbeatRequest(BaseModel):
         assert normalized is not None
         return normalized
 
+    @field_validator("boot_time", mode="after")
+    @classmethod
+    def normalize_boot_time(cls, value: datetime | None) -> datetime | None:
+        return _normalize_datetime(value, "boot_time")
+
 
 class HeartbeatStatus(BaseModel):
     deviceId: str
@@ -82,6 +88,7 @@ class HeartbeatStatus(BaseModel):
     signalRssi: int | None
     latencyMs: int | None
     lastSessionAt: datetime | None
+    bootTime: datetime | None
 
 
 class HeartbeatSummaryResponse(BaseModel):

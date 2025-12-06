@@ -81,6 +81,43 @@ def test_degraded_when_audio_or_scheduler_fail(client):
     assert device["status"] == "degraded"
 
 
+def test_boot_time_recorded_and_returned(client):
+    boot = datetime.now(timezone.utc) - timedelta(hours=5)
+    payload = _heartbeat_payload(
+        device_id="hb-device-4",
+        connectivity="wifi",
+        agent_status="ok",
+        last_session_at=None,
+        network_latency=100,
+        boot_time=boot,
+    )
+    headers = {"Authorization": "Bearer test-ingest-token"}
+    client.post("/internal/heartbeat", json=payload, headers=headers)
+
+    listing = client.get("/api/heartbeats", headers={"Authorization": "Bearer admin-token"})
+    device = next(d for d in listing.json()["devices"] if d["deviceId"] == "hb-device-4")
+    assert device["bootTime"] is not None
+    parsed_boot = _parse_dt(device["bootTime"])
+    # Allow small difference due to serialization
+    assert abs((parsed_boot - boot).total_seconds()) < 1
+
+
+def test_boot_time_null_when_not_provided(client):
+    payload = _heartbeat_payload(
+        device_id="hb-device-5",
+        connectivity="wifi",
+        agent_status="ok",
+        last_session_at=None,
+        network_latency=100,
+    )
+    headers = {"Authorization": "Bearer test-ingest-token"}
+    client.post("/internal/heartbeat", json=payload, headers=headers)
+
+    listing = client.get("/api/heartbeats", headers={"Authorization": "Bearer admin-token"})
+    device = next(d for d in listing.json()["devices"] if d["deviceId"] == "hb-device-5")
+    assert device["bootTime"] is None
+
+
 def _parse_dt(value: str | None) -> datetime | None:
     if value is None:
         return None
@@ -94,6 +131,7 @@ def _heartbeat_payload(
     agent_status: str,
     last_session_at: datetime | None,
     network_latency: int | None,
+    boot_time: datetime | None = None,
 ) -> dict:
     now = datetime.now(timezone.utc)
     return {
@@ -108,5 +146,6 @@ def _heartbeat_payload(
         },
         "agent_status": agent_status,
         "last_session_at": None if last_session_at is None else last_session_at.isoformat(),
+        "boot_time": None if boot_time is None else boot_time.isoformat(),
         "timestamp": now.isoformat(),
     }

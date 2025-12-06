@@ -88,6 +88,7 @@ class DeviceLatestHeartbeat(Base):
     latency_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     agent_status: Mapped[str] = mapped_column(String, nullable=False)
     last_session_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    boot_time: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     server_received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
