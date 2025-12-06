@@ -15,6 +15,7 @@ STALE_MINUTES = 20
 RETENTION_DAYS = 7
 RAW_RETENTION_HOURS = 2  # Keep raw events for 2 hours before compacting
 CLEANUP_PROBABILITY = 0.01  # 1% chance per heartbeat request
+HEARTBEAT_INTERVAL_SECONDS = 300  # Expected interval between heartbeats (5 minutes)
 
 
 def record_heartbeat(db: Session, heartbeat: HeartbeatRequest) -> DeviceLatestHeartbeat:
@@ -158,6 +159,7 @@ def compact_heartbeat_events(db: Session) -> int:
         connectivities = []
         ok_count = 0
         degraded_count = 0
+        boot_times: set[str] = set()
 
         for event in events:
             payload = event.raw_payload or {}
@@ -171,12 +173,22 @@ def compact_heartbeat_events(db: Session) -> int:
                 ok_count += 1
             else:
                 degraded_count += 1
+            # Track unique boot times to detect reboots
+            boot_time = payload.get("boot_time")
+            if boot_time:
+                boot_times.add(boot_time)
 
         # Calculate aggregates
         avg_latency = int(sum(latencies) / len(latencies)) if latencies else None
         min_latency = min(latencies) if latencies else None
         max_latency = max(latencies) if latencies else None
         connectivity_mode = Counter(connectivities).most_common(1)[0][0] if connectivities else "unknown"
+
+        # Each heartbeat confirms device was up for ~HEARTBEAT_INTERVAL_SECONDS
+        # Cap at 3600 seconds (1 hour) max
+        uptime_seconds = min(len(events) * HEARTBEAT_INTERVAL_SECONDS, 3600)
+        # Reboots = number of distinct boot_times minus 1 (first boot isn't a reboot)
+        reboot_count = max(0, len(boot_times) - 1)
 
         # Upsert summary
         existing = db.get(DeviceHeartbeatSummary, (device_id, hour_bucket))
@@ -195,6 +207,8 @@ def compact_heartbeat_events(db: Session) -> int:
                 existing.max_latency_ms = max(existing.max_latency_ms or max_latency, max_latency)
             existing.agent_status_ok_count += ok_count
             existing.agent_status_degraded_count += degraded_count
+            existing.uptime_seconds = min(existing.uptime_seconds + uptime_seconds, 3600)
+            existing.reboot_count += reboot_count
         else:
             db.add(DeviceHeartbeatSummary(
                 device_id=device_id,
@@ -206,6 +220,8 @@ def compact_heartbeat_events(db: Session) -> int:
                 connectivity_mode=connectivity_mode,
                 agent_status_ok_count=ok_count,
                 agent_status_degraded_count=degraded_count,
+                uptime_seconds=uptime_seconds,
+                reboot_count=reboot_count,
             ))
 
     # Delete compacted raw events

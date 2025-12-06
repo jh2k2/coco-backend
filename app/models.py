@@ -179,6 +179,8 @@ class DeviceHeartbeatSummary(Base):
     connectivity_mode: Mapped[str] = mapped_column(String(20), nullable=False)
     agent_status_ok_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     agent_status_degraded_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    uptime_seconds: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    reboot_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
 
 
