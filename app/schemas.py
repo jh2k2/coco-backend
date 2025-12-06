@@ -224,3 +224,18 @@ class DeviceUserInfo(BaseModel):
 class DeviceUsersResponse(BaseModel):
     device_id: str
     users: list[DeviceUserInfo]
+
+
+# Device Uptime Stats Schemas
+
+
+class DeviceUptimeStats(BaseModel):
+    device_id: str
+    uptime_pct_7d: float
+    reboots_7d: int
+    total_hours_tracked: int
+
+
+class DeviceUptimeResponse(BaseModel):
+    devices: list[DeviceUptimeStats]
+    as_of: datetime

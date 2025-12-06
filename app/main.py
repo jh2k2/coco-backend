@@ -18,13 +18,15 @@ from .auth import authorize_dashboard_access, require_admin_token, require_servi
 from .config import get_settings
 from .database import Base, engine
 from .dependencies import get_db
-from .models import DashboardRollup, Session as SessionModel, User
+from .models import DashboardRollup, DeviceHeartbeatSummary, Session as SessionModel, User
 from .schemas import (
     AvgDuration,
     CommandCreateRequest,
     CommandResponse,
     CommandStatusUpdate,
     DashboardResponse,
+    DeviceUptimeResponse,
+    DeviceUptimeStats,
     DeviceUserInfo,
     DeviceUsersResponse,
     HeartbeatRequest,
@@ -405,6 +407,47 @@ def get_device_users(
     ]
 
     return DeviceUsersResponse(device_id=device_id, users=users)
+
+
+@app.get("/admin/devices/uptime", response_model=DeviceUptimeResponse, status_code=status.HTTP_200_OK)
+def get_device_uptime_stats(
+    db: Session = Depends(get_db),
+    authorization: str | None = Header(default=None),
+) -> DeviceUptimeResponse:
+    """Get 7-day uptime statistics for all devices."""
+    require_admin_token(authorization)
+    now = datetime.now(timezone.utc)
+    cutoff = now - timedelta(days=7)
+
+    # Query aggregated uptime stats per device
+    stmt = (
+        select(
+            DeviceHeartbeatSummary.device_id,
+            sa_func.sum(DeviceHeartbeatSummary.uptime_seconds).label("total_uptime"),
+            sa_func.sum(DeviceHeartbeatSummary.reboot_count).label("total_reboots"),
+            sa_func.count(DeviceHeartbeatSummary.hour_bucket).label("hours_tracked"),
+        )
+        .where(DeviceHeartbeatSummary.hour_bucket >= cutoff)
+        .group_by(DeviceHeartbeatSummary.device_id)
+        .order_by(DeviceHeartbeatSummary.device_id)
+    )
+
+    results = db.execute(stmt).all()
+
+    # Calculate uptime percentage (max possible = 7 days * 24 hours * 3600 seconds)
+    max_seconds = 7 * 24 * 3600
+
+    devices = [
+        DeviceUptimeStats(
+            device_id=row.device_id,
+            uptime_pct_7d=round((row.total_uptime or 0) * 100.0 / max_seconds, 2),
+            reboots_7d=row.total_reboots or 0,
+            total_hours_tracked=row.hours_tracked or 0,
+        )
+        for row in results
+    ]
+
+    return DeviceUptimeResponse(devices=devices, as_of=now)
 
 
 # Device Endpoints (Internal)

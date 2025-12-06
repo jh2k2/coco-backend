@@ -182,12 +182,13 @@ Errors during configuration parsing raise early with human-readable messages to 
 
 **Tables (8 total):**
 - `users`: Stores canonical participants. `external_id` matches the frontend `user_id`.
-- `sessions`: Stores ingest records with duration, sentiment, and uniqueness enforced by `session_id`. Includes optional `device_id` to link sessions to the originating device.
+- `sessions`: Stores ingest records with duration, sentiment, and uniqueness enforced by `session_id`. Includes optional `device_id` to link sessions to the originating device and optional `status` field (`success`, `unattended`, `early_exit`, `error_exit`).
 - `dashboard_rollups`: Stores precomputed arrays for last seven days along with aggregate metrics and `updated_at` timestamp.
 - `device_latest_heartbeat`: Stores only the most recent heartbeat per device (upsert pattern).
 - `device_heartbeat_events`: Append-only raw payload log for historical analysis (7-day retention).
 - `device_commands`: Stores commands queued for IoT devices with status lifecycle (PENDING → PICKED_UP → COMPLETED/FAILED).
 - `device_log_snapshots`: Stores log content uploaded by devices for remote debugging.
+- `device_heartbeat_summaries`: Hourly aggregated heartbeat data including uptime tracking (`uptime_seconds`, `reboot_count`) and latency stats.
 
 **Migration History:**
 | Revision | Description |
@@ -197,6 +198,10 @@ Errors during configuration parsing raise early with human-readable messages to 
 | `202502110001` | Heartbeat final spec |
 | `202511250001` | Add device_commands and device_log_snapshots |
 | `202511260001` | Add device_id column to sessions |
+| `202511260002` | Add device_heartbeat_summaries table |
+| `202511300001` | Add status column to sessions |
+| `202512050001` | Add boot_time to device_latest_heartbeat |
+| `202512050002` | Add uptime_seconds and reboot_count to heartbeat summaries |
 
 **Highlights:**
 - UUID primary keys with `gen_random_uuid()` defaults.
@@ -298,9 +303,16 @@ Errors during configuration parsing raise early with human-readable messages to 
     "user_external_id": "string",
     "started_at": "2025-10-22T14:30:00Z",
     "duration_seconds": 720,
-    "sentiment_score": 0.68
+    "sentiment_score": 0.68,
+    "status": "success"
   }
   ```
+
+  **Status values (optional):**
+  - `success` — User participated in the session (has utterances)
+  - `unattended` — Session ran but no user input was detected
+  - `early_exit` — User triggered end_session during intro phase
+  - `error_exit` — Session crashed/errored unexpectedly
 
 - **Behavior:**
   - Validates payload ranges and timezone awareness.
@@ -543,6 +555,27 @@ The device command system enables remote management of IoT devices (Raspberry Pi
   ```
 
 - **Behavior:** Lists all users who have sessions on the specified device, ordered by most recent session.
+
+### GET `/admin/devices/uptime`
+
+- **Authorization:** Bearer token matching `ADMIN_TOKEN`.
+- **Response** `200 OK`:
+
+  ```json
+  {
+    "devices": [
+      {
+        "device_id": "coco-001",
+        "uptime_pct_7d": 98.5,
+        "reboots_7d": 2,
+        "total_hours_tracked": 168
+      }
+    ],
+    "as_of": "2025-12-05T14:45:00Z"
+  }
+  ```
+
+- **Behavior:** Aggregates uptime data from `device_heartbeat_summaries` for the last 7 days. Uptime percentage is calculated based on heartbeat coverage (each heartbeat confirms ~5 minutes of uptime). Reboot count tracks `boot_time` changes detected during heartbeat compaction.
 
 ### GET `/internal/commands/pending`
 
