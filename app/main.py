@@ -11,8 +11,9 @@ from typing import Dict, List
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response, status
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import func as sa_func, select
-from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
+
+from .db_utils import dialect_insert
 
 from .auth import authorize_dashboard_access, require_admin_token, require_service_token
 from .config import get_settings
@@ -207,15 +208,9 @@ def ingest_session_summary_endpoint(
     require_service_token(authorization)
     request.state.user_id = payload.user_external_id
     device_id = x_device_id or payload.device_id
-    try:
-        result = ingest_session_summary(db, payload, device_id=device_id)
-        db.commit()
-    except IntegrityError as exc:
-        db.rollback()
-        if _is_unique_violation(exc):
-            # Treat unique violations on session insert as safe duplicates.
-            return {"status": "duplicate"}
-        raise
+    # ON CONFLICT DO NOTHING handles duplicates atomically without rollbacks
+    result = ingest_session_summary(db, payload, device_id=device_id)
+    db.commit()
     if result["duplicate"]:
         return {"status": "duplicate"}
     return {"status": "ok"}
@@ -234,15 +229,13 @@ def get_dashboard(
     user_stmt = select(User).where(User.external_id == user_id).limit(1)
     user = db.execute(user_stmt).scalar_one_or_none()
     if user is None:
-        user = User(external_id=user_id)
-        db.add(user)
-        try:
-            db.commit()
-        except IntegrityError:
-            db.rollback()
-            user = db.execute(user_stmt).scalar_one()
-        else:
-            db.refresh(user)
+        # Use ON CONFLICT DO NOTHING for atomic user creation without rollbacks
+        stmt = dialect_insert(db, User).values(
+            external_id=user_id
+        ).on_conflict_do_nothing(index_elements=['external_id'])
+        db.execute(stmt)
+        db.commit()  # Must commit - get_db() doesn't auto-commit
+        user = db.execute(user_stmt).scalar_one()
 
     rollup = db.get(DashboardRollup, user.id)
     now = datetime.now(timezone.utc)
@@ -309,13 +302,6 @@ def _to_optional_float(value: Decimal | None) -> float | None:
     if value is None:
         return None
     return round(float(value), 2)
-
-
-def _is_unique_violation(error: IntegrityError) -> bool:
-    if hasattr(error.orig, "pgcode") and error.orig.pgcode == "23505":
-        return True
-    message = str(error.orig).lower()
-    return "unique" in message or "duplicate" in message
 
 
 # Admin Endpoints

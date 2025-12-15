@@ -48,3 +48,15 @@ def client():
     from fastapi.testclient import TestClient
     with TestClient(app) as test_client:
         yield test_client
+
+
+@pytest.fixture
+def db_session():
+    """Provide a database session for direct database tests."""
+    from app.database import SessionLocal
+    session = SessionLocal()
+    try:
+        yield session
+    finally:
+        session.rollback()
+        session.close()

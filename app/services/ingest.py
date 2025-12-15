@@ -9,48 +9,51 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..config import get_settings
+from ..db_utils import dialect_insert
 from ..models import DashboardRollup, Session as SessionModel, User
 from ..schemas import SessionSummaryIngestRequest
 
 
 def ingest_session_summary(db: Session, payload: SessionSummaryIngestRequest, device_id: str | None = None) -> Dict[str, bool]:
+    """Ingest a session summary, handling duplicates atomically with ON CONFLICT."""
     settings = get_settings()
     user = _get_or_create_user(db, payload.user_external_id)
-    if _session_exists(db, payload.session_id):
+
+    # Use ON CONFLICT DO NOTHING for atomic duplicate detection
+    # This eliminates race conditions and avoids transaction rollbacks
+    stmt = dialect_insert(db, SessionModel).values(
+        user_id=user.id,
+        device_id=device_id,
+        session_id=payload.session_id,
+        started_at=payload.started_at,
+        duration_seconds=payload.duration_seconds,
+        sentiment_score=_quantize_score(payload.sentiment_score),
+        status=payload.status,
+    ).on_conflict_do_nothing(index_elements=['session_id'])
+
+    result = db.execute(stmt)
+    if result.rowcount == 0:
         return {"duplicate": True}
 
-    db.add(
-        SessionModel(
-            user_id=user.id,
-            device_id=device_id,
-            session_id=payload.session_id,
-            started_at=payload.started_at,
-            duration_seconds=payload.duration_seconds,
-            sentiment_score=_quantize_score(payload.sentiment_score),
-            status=payload.status,
-        )
-    )
     db.flush()
-
     recompute_dashboard_rollup(db, user.id, settings.rollup_window_days)
     return {"duplicate": False}
 
 
 def _get_or_create_user(db: Session, external_id: str) -> User:
-    stmt = select(User).where(User.external_id == external_id).limit(1)
-    user = db.execute(stmt).scalar_one_or_none()
-    if user:
-        return user
-
-    user = User(external_id=external_id)
-    db.add(user)
+    """Get or create a user, handling concurrent creation atomically with ON CONFLICT."""
+    # Use ON CONFLICT DO NOTHING for atomic upsert behavior
+    # This eliminates race conditions and avoids transaction rollbacks
+    stmt = dialect_insert(db, User).values(
+        external_id=external_id
+    ).on_conflict_do_nothing(index_elements=['external_id'])
+    db.execute(stmt)
     db.flush()
-    return user
 
-
-def _session_exists(db: Session, session_id: str) -> bool:
-    stmt = select(SessionModel.id).where(SessionModel.session_id == session_id).limit(1)
-    return db.execute(stmt).scalar_one_or_none() is not None
+    # Always SELECT to get the user (whether just created or already existed)
+    return db.execute(
+        select(User).where(User.external_id == external_id)
+    ).scalar_one()
 
 
 def recompute_dashboard_rollup(db: Session, user_id: str, window_days: int) -> None:

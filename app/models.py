@@ -92,7 +92,8 @@ class DeviceLatestHeartbeat(Base):
     server_received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
-Index("idx_device_latest_heartbeat_received_at", DeviceLatestHeartbeat.server_received_at.desc())
+# NOTE: idx_device_latest_heartbeat_received_at was removed in migration 202512150002
+# as it had 0 uses. Monitor table growth - may need to recreate if table grows large.
 
 
 class DeviceHeartbeatEvent(Base):
@@ -145,7 +146,9 @@ class DeviceCommand(Base):
 
 
 Index("idx_device_commands_device_status", DeviceCommand.device_id, DeviceCommand.status)
-Index("idx_device_commands_created_at", DeviceCommand.created_at.desc())
+# Composite index for efficient command polling: WHERE device_id=? AND status='PENDING' ORDER BY created_at
+Index("idx_device_commands_polling", DeviceCommand.device_id, DeviceCommand.status, DeviceCommand.created_at)
+# NOTE: idx_device_commands_created_at was removed in migration 202512150002 - superseded by idx_device_commands_polling
 
 
 class DeviceLogSnapshot(Base):

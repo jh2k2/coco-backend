@@ -126,8 +126,9 @@ coco-backend/
 │   ├── auth.py                  # Auth utilities for bearer tokens
 │   ├── config.py                # Environment-driven configuration
 │   ├── database.py              # Engine/session factory setup
-│   ├── dependencies.py          # FastAPI dependency wrappers
 │   ├── db_types.py              # Cross-dialect array types (Postgres + SQLite tests)
+│   ├── db_utils.py              # Dialect-aware database utilities (ON CONFLICT support)
+│   ├── dependencies.py          # FastAPI dependency wrappers
 │   ├── main.py                  # FastAPI routes and orchestration
 │   ├── models.py                # SQLAlchemy ORM models
 │   ├── schemas.py               # Pydantic request/response schemas
@@ -202,11 +203,13 @@ Errors during configuration parsing raise early with human-readable messages to 
 | `202511300001` | Add status column to sessions |
 | `202512050001` | Add boot_time to device_latest_heartbeat |
 | `202512050002` | Add uptime_seconds and reboot_count to heartbeat summaries |
+| `202512150001` | Add composite index for command polling optimization |
+| `202512150002` | Drop unused indexes to reduce write overhead |
 
 **Highlights:**
 - UUID primary keys with `gen_random_uuid()` defaults.
 - Check constraints ensure `duration_seconds` (0–86400) and `sentiment_score` (0–1).
-- Key indexes: `idx_sessions_user_started`, `idx_sessions_device_id`, `idx_device_commands_device_status`.
+- Key indexes: `idx_sessions_user_started`, `idx_sessions_device_id`, `idx_device_commands_device_status`, `idx_device_commands_polling` (composite index for efficient command polling).
 - Array columns use PostgreSQL `BOOLEAN[]`, `INT[]`, and `NUMERIC(4,2)[]` in production; the automated tests use equivalent JSON-backed shims for SQLite.
 
 > **Note:** Ensure the `pgcrypto` extension (for `gen_random_uuid()`) is enabled in the target database.
@@ -233,6 +236,12 @@ Errors during configuration parsing raise early with human-readable messages to 
 - Provides `TypeDecorator` helpers that store booleans, integers, and decimals as PostgreSQL ARRAY fields in production while falling back to JSON columns in SQLite-based tests.
 - Preserves decimal precision for sentiment scores and keeps list ordering consistent regardless of database backend.
 
+### Dialect-Aware Database Utilities (`app/db_utils.py`)
+
+- Provides a `dialect_insert()` helper that returns the appropriate INSERT statement for ON CONFLICT support across PostgreSQL and SQLite.
+- Enables atomic upsert patterns (ON CONFLICT DO NOTHING) that eliminate transaction rollbacks from duplicate key violations.
+- Used by ingest and dashboard endpoints to handle concurrent user creation and duplicate session detection without expensive exception handling.
+
 ### ORM Models (`app/models.py`)
 
 - `User`: Represents dashboard participants; includes relationships to `Session` and `DashboardRollup`.
@@ -254,9 +263,8 @@ Errors during configuration parsing raise early with human-readable messages to 
 
 ### Ingestion & Rollup Service (`app/services/ingest.py`)
 
-- `ingest_session_summary()` orchestrates user upsert, duplicate detection, session insertion, and rollup recompute.
-- `_get_or_create_user()` finds or creates a `User` row based on `external_id`.
-- `_session_exists()` checks `session_id` uniqueness to enforce idempotency.
+- `ingest_session_summary()` orchestrates user upsert, atomic session insertion with ON CONFLICT, and rollup recompute.
+- `_get_or_create_user()` atomically finds or creates a `User` row using ON CONFLICT DO NOTHING to handle concurrent creation without transaction rollbacks.
 - `recompute_dashboard_rollup()`:
   - Collects sessions in the configured window.
   - Bins sessions by day (UTC), computes per-day flags, rounded minutes, and mean sentiment.
@@ -285,7 +293,6 @@ Errors during configuration parsing raise early with human-readable messages to 
 - Utility functions:
   - `_build_dashboard_response()` merges raw rollup data with derived values.
   - `_calculate_streak_days()` counts consecutive `True` values from the end of `dailyActivity`.
-  - `_is_unique_violation()` detects duplicate insert attempts from SQLAlchemy exceptions.
 
 ---
 
@@ -398,7 +405,6 @@ Pipe the output into `curl --data @-` to avoid saving a temporary file. Once the
 - `last_session_at TIMESTAMPTZ NULL`
 - `boot_time TIMESTAMPTZ NULL` (device boot timestamp for uptime calculation)
 - `server_received_at TIMESTAMPTZ NOT NULL`
-- Index: `idx_device_latest_heartbeat_received_at` on `server_received_at DESC`
 
 `device_heartbeat_events` (append-only raw payload log)
 - `id UUID PRIMARY KEY DEFAULT gen_random_uuid()`
@@ -695,7 +701,8 @@ This minimal model is sufficient for an MVP and can be upgraded to OAuth/JWT lat
 ## Error Handling & Idempotency
 
 - Input validation relies on Pydantic. Invalid payloads produce informative `422` responses automatically.
-- Duplicate sessions (`session_id` conflict) are caught before insert; if a race slips through, the `IntegrityError` handler returns a duplicate response.
+- Duplicate sessions (`session_id` conflict) are handled atomically using ON CONFLICT DO NOTHING, eliminating transaction rollbacks and reducing database compute overhead.
+- User creation uses the same ON CONFLICT pattern to handle concurrent requests without race conditions.
 - Database operations use SQLAlchemy sessions with explicit commits inside routes to surface errors predictably.
 - Dashboard requests for unknown users return `200 OK` with a zeroed-out structure so the frontend can render an empty state without special-case logic.
 
@@ -801,12 +808,13 @@ Keep tokens in a secrets manager for shared environments and rotate them regular
 
 ## Testing Suite
 
-- **Framework:** Pytest (see `requirements.txt`). The suite boots the FastAPI app against an in-memory SQLite database that mimics PostgreSQL array semantics via `app/db_types.py`.
+- **Framework:** Pytest (see `requirements.txt`). The suite boots the FastAPI app against an in-memory SQLite database that mimics PostgreSQL array semantics via `app/db_types.py` and ON CONFLICT patterns via `app/db_utils.py`.
 - **Coverage:**
   - `tests/test_rollup.py` validates streak math, tone thresholds, recent/warning/stale cutoffs, and the empty-state response when a user is first seen.
   - `tests/test_auth_and_cors.py` ensures auth failures return the correct codes and that CORS only approves the configured dashboard origin.
   - `tests/test_ingest.py` confirms ingest idempotency returns `{"status":"duplicate"}` with `200` once a session ID repeats.
-- `tests/test_helpers.py` locks down the helper utilities (streak calculation, rounding, tone classification, duplicate detection) so regressions are caught before hitting the API layer.
+  - `tests/test_cu_optimizations.py` validates the ON CONFLICT patterns for duplicate handling without transaction rollbacks and user data persistence.
+- `tests/test_helpers.py` locks down the helper utilities (streak calculation, rounding, tone classification) so regressions are caught before hitting the API layer.
 - **Running:** Activate your virtualenv, install dependencies, and execute `pytest` (for example, `source .venv/bin/activate && pytest`). Add new tests with clear, deterministic expectations whenever you change rollup math, security, or response formats.
 
 ---

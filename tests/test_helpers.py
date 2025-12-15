@@ -4,22 +4,9 @@ from decimal import Decimal
 from types import SimpleNamespace
 
 import pytest
-from sqlalchemy.exc import IntegrityError
 
-from app.main import _calculate_streak_days, _is_unique_violation, _to_optional_float
+from app.main import _calculate_streak_days, _to_optional_float
 from app.services import ingest as ingest_module
-
-
-def _integrity_error(message: str, pgcode: str | None = None) -> IntegrityError:
-    class DummyOrig:
-        def __init__(self, text: str, code: str | None):
-            self.pgcode = code
-            self._text = text
-
-        def __str__(self) -> str:
-            return self._text
-
-    return IntegrityError("INSERT", {}, DummyOrig(message, pgcode))
 
 
 @pytest.mark.parametrize(
@@ -40,14 +27,7 @@ def test_optional_float_rounding_and_none():
     assert _to_optional_float(None) is None
 
 
-def test_is_unique_violation_detects_pgcode():
-    error = _integrity_error("duplicate key value", pgcode="23505")
-    assert _is_unique_violation(error) is True
-
-
-def test_is_unique_violation_detects_message_keyword():
-    error = _integrity_error("UNIQUE constraint failed: sessions.session_id")
-    assert _is_unique_violation(error) is True
+# NOTE: _is_unique_violation tests removed - function replaced with ON CONFLICT pattern
 
 
 @pytest.mark.parametrize(
