@@ -2,13 +2,15 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Dict, List
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response, status
+import boto3
+from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Request, Response, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import func as sa_func, select
 from sqlalchemy.orm import Session
@@ -19,7 +21,7 @@ from .auth import authorize_dashboard_access, require_admin_token, require_servi
 from .config import get_settings
 from .database import Base, engine
 from .dependencies import get_db
-from .models import DashboardRollup, DeviceHeartbeatSummary, Session as SessionModel, User
+from .models import AudioRecording, DashboardRollup, DeviceHeartbeatSummary, Session as SessionModel, User
 from .schemas import (
     AvgDuration,
     CommandCreateRequest,
@@ -57,6 +59,21 @@ logging.basicConfig(level=logging.INFO)
 
 settings = get_settings()
 WINDOW_DAYS = settings.rollup_window_days
+
+# R2 client for audio storage
+r2_client = None
+R2_BUCKET = os.environ.get("R2_BUCKET_NAME", "coco-audio-recordings")
+
+def get_r2_client():
+    global r2_client
+    if r2_client is None and os.environ.get("R2_ENDPOINT"):
+        r2_client = boto3.client(
+            "s3",
+            endpoint_url=os.environ.get("R2_ENDPOINT"),
+            aws_access_key_id=os.environ.get("R2_ACCESS_KEY_ID"),
+            aws_secret_access_key=os.environ.get("R2_SECRET_ACCESS_KEY"),
+        )
+    return r2_client
 
 docs_enabled = settings.environment != "production"
 
@@ -522,3 +539,81 @@ def upload_logs(
         )
     )
     return {"status": "ok", "snapshot_id": str(snapshot.id)}
+
+
+@app.post("/internal/ingest/audio", status_code=status.HTTP_200_OK)
+async def upload_audio(
+    file: UploadFile = File(...),
+    metadata: str = Form(...),
+    db: Session = Depends(get_db),
+    authorization: str | None = Header(default=None),
+) -> Dict[str, str]:
+    """Upload audio recording to R2 and store metadata in database."""
+    require_service_token(authorization)
+
+    r2 = get_r2_client()
+    if r2 is None:
+        raise HTTPException(status_code=503, detail="R2 storage not configured")
+
+    meta = json.loads(metadata)
+
+    recording_id = uuid.UUID(meta["recording_id"])
+    session_id = uuid.UUID(meta["session_id"])
+    device_id = meta["device_id"]
+    recorded_at_str = meta["recorded_at"]
+
+    # Parse timestamp
+    if recorded_at_str.endswith("Z"):
+        recorded_at_str = recorded_at_str[:-1] + "+00:00"
+    recorded_at = datetime.fromisoformat(recorded_at_str)
+
+    # Generate R2 key with date hierarchy
+    key = f"recordings/{device_id}/{recorded_at.year}/{recorded_at.month:02d}/{recorded_at.day:02d}/{recording_id}.opus"
+
+    # Read file content
+    content = await file.read()
+
+    # Upload to R2
+    r2.put_object(
+        Bucket=R2_BUCKET,
+        Key=key,
+        Body=content,
+        ContentType="audio/opus",
+        Metadata={
+            "session-id": str(session_id),
+            "sha256": meta.get("sha256", ""),
+        },
+    )
+
+    storage_url = f"https://{R2_BUCKET}.r2.cloudflarestorage.com/{key}"
+
+    # Insert into database
+    audio_record = AudioRecording(
+        id=recording_id,
+        session_id=session_id,
+        device_id=device_id,
+        participant_id=meta.get("participant_id"),
+        turn_number=meta["turn_number"],
+        activity_id=meta.get("activity_id"),
+        duration_ms=meta["duration_ms"],
+        file_size_bytes=len(content),
+        storage_url=storage_url,
+        sha256=meta.get("sha256"),
+        recorded_at=recorded_at,
+    )
+    db.add(audio_record)
+    db.commit()
+
+    logger.info(
+        json.dumps(
+            {
+                "event": "audio_uploaded",
+                "recording_id": str(recording_id),
+                "session_id": str(session_id),
+                "device_id": device_id,
+                "file_size_bytes": len(content),
+            }
+        )
+    )
+
+    return {"success": True, "url": storage_url}

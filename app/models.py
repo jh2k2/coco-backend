@@ -188,3 +188,39 @@ class DeviceHeartbeatSummary(Base):
 
 
 Index("idx_heartbeat_summaries_device_hour", DeviceHeartbeatSummary.device_id, DeviceHeartbeatSummary.hour_bucket.desc())
+
+
+class AudioRecording(Base):
+    """Audio recordings from device sessions, stored in R2."""
+
+    __tablename__ = "audio_recordings"
+    __table_args__ = (
+        UniqueConstraint("session_id", "turn_number", name="uq_audio_session_turn"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        primary_key=True,
+    )
+    session_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    device_id: Mapped[str] = mapped_column(Text, nullable=False)
+    participant_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    turn_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    activity_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    duration_ms: Mapped[int] = mapped_column(Integer, nullable=False)
+    file_size_bytes: Mapped[int] = mapped_column(Integer, nullable=False)
+    codec: Mapped[str] = mapped_column(String(20), nullable=False, default="opus")
+    sample_rate: Mapped[int] = mapped_column(Integer, nullable=False, default=24000)
+    channels: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    bitrate_kbps: Mapped[int] = mapped_column(Integer, nullable=False, default=24)
+    storage_url: Mapped[str] = mapped_column(Text, nullable=False)
+    storage_provider: Mapped[str] = mapped_column(String(50), nullable=False, default="r2")
+    sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    recorded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    uploaded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+Index("idx_audio_device", AudioRecording.device_id)
+Index("idx_audio_participant", AudioRecording.participant_id)
+Index("idx_audio_session", AudioRecording.session_id)
+Index("idx_audio_recorded", AudioRecording.recorded_at.desc())
