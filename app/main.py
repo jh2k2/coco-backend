@@ -557,7 +557,8 @@ async def upload_audio(
 
     meta = json.loads(metadata)
 
-    recording_id = uuid.UUID(meta["recording_id"])
+    # Generate recording_id if not provided (for backwards compatibility)
+    recording_id = uuid.UUID(meta["recording_id"]) if "recording_id" in meta else uuid.uuid4()
     session_id = uuid.UUID(meta["session_id"])
     device_id = meta["device_id"]
     recorded_at_str = meta["recorded_at"]
