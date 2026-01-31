@@ -547,7 +547,7 @@ async def upload_audio(
     metadata: str = Form(...),
     db: Session = Depends(get_db),
     authorization: str | None = Header(default=None),
-) -> Dict[str, str]:
+) -> Dict[str, str | bool]:
     """Upload audio recording to R2 and store metadata in database."""
     require_service_token(authorization)
 
