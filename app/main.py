@@ -548,7 +548,11 @@ async def upload_audio(
     db: Session = Depends(get_db),
     authorization: str | None = Header(default=None),
 ) -> Dict[str, str | bool]:
-    """Upload audio recording to R2 and store metadata in database."""
+    """Upload audio recording to R2 and store metadata in database.
+
+    Supports both legacy Opus format and new FLAC format.
+    Detects format from metadata.codec field (defaults to flac).
+    """
     require_service_token(authorization)
 
     r2 = get_r2_client()
@@ -563,13 +567,26 @@ async def upload_audio(
     device_id = meta["device_id"]
     recorded_at_str = meta["recorded_at"]
 
+    # New fields (with defaults for backwards compatibility)
+    role = meta.get("role", "user")
+    transcript = meta.get("transcript")
+    codec = meta.get("codec", "flac")  # Default to flac for new uploads
+
     # Parse timestamp
     if recorded_at_str.endswith("Z"):
         recorded_at_str = recorded_at_str[:-1] + "+00:00"
     recorded_at = datetime.fromisoformat(recorded_at_str)
 
+    # Determine file extension and content type based on codec
+    if codec == "opus":
+        ext = "opus"
+        content_type = "audio/opus"
+    else:
+        ext = "flac"
+        content_type = "audio/flac"
+
     # Generate R2 key with date hierarchy
-    key = f"recordings/{device_id}/{recorded_at.year}/{recorded_at.month:02d}/{recorded_at.day:02d}/{recording_id}.opus"
+    key = f"recordings/{device_id}/{recorded_at.year}/{recorded_at.month:02d}/{recorded_at.day:02d}/{recording_id}.{ext}"
 
     # Read file content
     content = await file.read()
@@ -579,9 +596,10 @@ async def upload_audio(
         Bucket=R2_BUCKET,
         Key=key,
         Body=content,
-        ContentType="audio/opus",
+        ContentType=content_type,
         Metadata={
             "session-id": str(session_id),
+            "role": role,
             "sha256": meta.get("sha256", ""),
         },
     )
@@ -595,9 +613,12 @@ async def upload_audio(
         device_id=device_id,
         participant_id=meta.get("participant_id"),
         turn_number=meta["turn_number"],
+        role=role,
         activity_id=meta.get("activity_id"),
         duration_ms=meta["duration_ms"],
         file_size_bytes=len(content),
+        codec=codec,
+        transcript=transcript,
         storage_url=storage_url,
         sha256=meta.get("sha256"),
         recorded_at=recorded_at,
@@ -612,9 +633,283 @@ async def upload_audio(
                 "recording_id": str(recording_id),
                 "session_id": str(session_id),
                 "device_id": device_id,
+                "role": role,
+                "codec": codec,
                 "file_size_bytes": len(content),
             }
         )
     )
 
     return {"success": True, "url": storage_url}
+
+
+@app.post("/internal/ingest/session_audio", status_code=status.HTTP_200_OK)
+async def upload_session_audio(
+    file: UploadFile = File(...),
+    metadata: str = Form(...),
+    db: Session = Depends(get_db),
+    authorization: str | None = Header(default=None),
+) -> Dict[str, str | bool]:
+    """Upload audio recording with session-based organization and manifest.
+
+    Stores audio in session folders:
+    recordings/{device_id}/{year}/{month}/{day}/{session_id}/{turn}_{role}.flac
+
+    Creates/updates manifest.json in the session folder with transcripts.
+    """
+    require_service_token(authorization)
+
+    r2 = get_r2_client()
+    if r2 is None:
+        raise HTTPException(status_code=503, detail="R2 storage not configured")
+
+    meta = json.loads(metadata)
+
+    # Required fields
+    session_id = uuid.UUID(meta["session_id"])
+    device_id = meta["device_id"]
+    turn_number = meta["turn_number"]
+    role = meta.get("role", "user")  # user or assistant
+    recorded_at_str = meta["recorded_at"]
+    duration_ms = meta["duration_ms"]
+
+    # Optional fields
+    recording_id = uuid.UUID(meta["recording_id"]) if "recording_id" in meta else uuid.uuid4()
+    participant_id = meta.get("participant_id")
+    activity_id = meta.get("activity_id")
+    transcript = meta.get("transcript")
+    sha256 = meta.get("sha256", "")
+
+    # Validate role
+    if role not in ("user", "assistant"):
+        raise HTTPException(status_code=400, detail="role must be 'user' or 'assistant'")
+
+    # Parse timestamp
+    if recorded_at_str.endswith("Z"):
+        recorded_at_str = recorded_at_str[:-1] + "+00:00"
+    recorded_at = datetime.fromisoformat(recorded_at_str)
+
+    # Session folder path
+    session_folder = f"recordings/{device_id}/{recorded_at.year}/{recorded_at.month:02d}/{recorded_at.day:02d}/{session_id}"
+
+    # Audio file key: {turn:02d}_{role}.flac
+    audio_key = f"{session_folder}/{turn_number:02d}_{role}.flac"
+
+    # Read file content
+    content = await file.read()
+
+    # Upload audio to R2
+    r2.put_object(
+        Bucket=R2_BUCKET,
+        Key=audio_key,
+        Body=content,
+        ContentType="audio/flac",
+        Metadata={
+            "session-id": str(session_id),
+            "role": role,
+            "turn": str(turn_number),
+            "sha256": sha256,
+        },
+    )
+
+    storage_url = f"https://{R2_BUCKET}.r2.cloudflarestorage.com/{audio_key}"
+
+    # Update manifest.json
+    manifest_key = f"{session_folder}/manifest.json"
+    manifest = _get_or_create_manifest(r2, manifest_key, session_id, device_id, participant_id, recorded_at)
+
+    # Add/update turn in manifest
+    _update_manifest_turn(
+        manifest,
+        turn_number=turn_number,
+        role=role,
+        audio_filepath=f"{turn_number:02d}_{role}.flac",
+        duration_ms=duration_ms,
+        transcript=transcript,
+        activity_id=activity_id,
+    )
+
+    # Upload updated manifest
+    r2.put_object(
+        Bucket=R2_BUCKET,
+        Key=manifest_key,
+        Body=json.dumps(manifest, indent=2),
+        ContentType="application/json",
+    )
+
+    # Update participant index for easy data retrieval by participant
+    if participant_id:
+        try:
+            _update_participant_index(
+                r2=r2,
+                participant_id=participant_id,
+                session_id=session_id,
+                device_id=device_id,
+                recorded_at=recorded_at,
+                duration_ms=duration_ms,
+                turn_number=turn_number,
+                manifest_key=manifest_key,
+            )
+        except Exception as e:
+            # Log but don't fail the upload if index update fails
+            logger.warning(f"Failed to update participant index: {e}")
+
+    # Insert into database
+    audio_record = AudioRecording(
+        id=recording_id,
+        session_id=session_id,
+        device_id=device_id,
+        participant_id=participant_id,
+        turn_number=turn_number,
+        role=role,
+        activity_id=activity_id,
+        duration_ms=duration_ms,
+        file_size_bytes=len(content),
+        codec="flac",
+        transcript=transcript,
+        storage_url=storage_url,
+        sha256=sha256 if sha256 else None,
+        recorded_at=recorded_at,
+    )
+    db.add(audio_record)
+    db.commit()
+
+    logger.info(
+        json.dumps(
+            {
+                "event": "session_audio_uploaded",
+                "recording_id": str(recording_id),
+                "session_id": str(session_id),
+                "device_id": device_id,
+                "turn_number": turn_number,
+                "role": role,
+                "file_size_bytes": len(content),
+            }
+        )
+    )
+
+    return {"success": True, "url": storage_url, "manifest_url": f"https://{R2_BUCKET}.r2.cloudflarestorage.com/{manifest_key}"}
+
+
+def _get_or_create_manifest(r2, manifest_key: str, session_id: uuid.UUID, device_id: str, participant_id: str | None, recorded_at: datetime) -> dict:
+    """Get existing manifest or create a new one."""
+    try:
+        response = r2.get_object(Bucket=R2_BUCKET, Key=manifest_key)
+        return json.loads(response["Body"].read().decode("utf-8"))
+    except r2.exceptions.ClientError as e:
+        # NoSuchKey or other errors - create new manifest
+        error_code = e.response.get("Error", {}).get("Code", "")
+        if error_code != "NoSuchKey":
+            logger.warning(f"Error fetching manifest {manifest_key}: {e}")
+    except Exception as e:
+        logger.warning(f"Unexpected error fetching manifest {manifest_key}: {e}")
+
+    return {
+        "session_id": str(session_id),
+        "device_id": device_id,
+        "participant_id": participant_id,
+        "started_at": recorded_at.isoformat(),
+        "turns": [],
+    }
+
+
+def _update_manifest_turn(manifest: dict, turn_number: int, role: str, audio_filepath: str, duration_ms: int, transcript: str | None, activity_id: str | None) -> None:
+    """Add or update a turn in the manifest."""
+    turns = manifest.get("turns", [])
+
+    # Find existing turn or create new one
+    turn_entry = None
+    for t in turns:
+        if t.get("turn") == turn_number:
+            turn_entry = t
+            break
+
+    if turn_entry is None:
+        turn_entry = {"turn": turn_number}
+        turns.append(turn_entry)
+        # Sort turns by turn number
+        turns.sort(key=lambda x: x.get("turn", 0))
+        manifest["turns"] = turns
+
+    # Add activity_id if provided
+    if activity_id:
+        turn_entry["activity_id"] = activity_id
+
+    # Add role data (user or assistant)
+    turn_entry[role] = {
+        "audio_filepath": audio_filepath,
+        "duration_ms": duration_ms,
+    }
+    if transcript:
+        turn_entry[role]["text"] = transcript
+
+
+def _update_participant_index(
+    r2,
+    participant_id: str,
+    session_id: uuid.UUID,
+    device_id: str,
+    recorded_at: datetime,
+    duration_ms: int,
+    turn_number: int,
+    manifest_key: str,
+) -> None:
+    """Update participant index with session reference for easy data retrieval."""
+    index_key = f"participants/{participant_id}/index.json"
+
+    # Get existing index or create new one
+    try:
+        response = r2.get_object(Bucket=R2_BUCKET, Key=index_key)
+        index = json.loads(response["Body"].read().decode("utf-8"))
+    except r2.exceptions.ClientError as e:
+        error_code = e.response.get("Error", {}).get("Code", "")
+        if error_code != "NoSuchKey":
+            logger.warning(f"Error fetching participant index {index_key}: {e}")
+        index = {
+            "participant_id": participant_id,
+            "created_at": recorded_at.isoformat(),
+            "session_count": 0,
+            "total_duration_ms": 0,
+            "sessions": [],
+        }
+    except Exception as e:
+        logger.warning(f"Unexpected error fetching participant index {index_key}: {e}")
+        index = {
+            "participant_id": participant_id,
+            "created_at": recorded_at.isoformat(),
+            "session_count": 0,
+            "total_duration_ms": 0,
+            "sessions": [],
+        }
+
+    # Find or add session entry
+    session_entry = next(
+        (s for s in index["sessions"] if s["session_id"] == str(session_id)), None
+    )
+    if session_entry is None:
+        session_entry = {
+            "session_id": str(session_id),
+            "device_id": device_id,
+            "started_at": recorded_at.isoformat(),
+            "manifest_path": manifest_key,
+            "turn_count": 0,
+            "total_duration_ms": 0,
+        }
+        index["sessions"].append(session_entry)
+
+    # Update session stats (accumulate duration, track max turn)
+    session_entry["turn_count"] = max(session_entry["turn_count"], turn_number)
+    session_entry["total_duration_ms"] = session_entry.get("total_duration_ms", 0) + duration_ms
+
+    # Update index-level stats
+    index["updated_at"] = datetime.utcnow().isoformat()
+    index["session_count"] = len(index["sessions"])
+    index["total_duration_ms"] = sum(s.get("total_duration_ms", 0) for s in index["sessions"])
+
+    # Upload updated index
+    r2.put_object(
+        Bucket=R2_BUCKET,
+        Key=index_key,
+        Body=json.dumps(index, indent=2),
+        ContentType="application/json",
+    )

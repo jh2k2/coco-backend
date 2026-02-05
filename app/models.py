@@ -195,7 +195,8 @@ class AudioRecording(Base):
 
     __tablename__ = "audio_recordings"
     __table_args__ = (
-        UniqueConstraint("session_id", "turn_number", name="uq_audio_session_turn"),
+        UniqueConstraint("session_id", "turn_number", "role", name="uq_audio_session_turn_role"),
+        CheckConstraint("role IN ('user', 'assistant')", name="chk_audio_role"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
@@ -206,13 +207,15 @@ class AudioRecording(Base):
     device_id: Mapped[str] = mapped_column(Text, nullable=False)
     participant_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     turn_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    role: Mapped[str] = mapped_column(String(20), nullable=False, default="user")
     activity_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
     duration_ms: Mapped[int] = mapped_column(Integer, nullable=False)
     file_size_bytes: Mapped[int] = mapped_column(Integer, nullable=False)
-    codec: Mapped[str] = mapped_column(String(20), nullable=False, default="opus")
+    codec: Mapped[str] = mapped_column(String(20), nullable=False, default="flac")
     sample_rate: Mapped[int] = mapped_column(Integer, nullable=False, default=24000)
     channels: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
-    bitrate_kbps: Mapped[int] = mapped_column(Integer, nullable=False, default=24)
+    bitrate_kbps: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    transcript: Mapped[str | None] = mapped_column(Text, nullable=True)
     storage_url: Mapped[str] = mapped_column(Text, nullable=False)
     storage_provider: Mapped[str] = mapped_column(String(50), nullable=False, default="r2")
     sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
